@@ -1,7 +1,7 @@
 use external::basic_nft;
 use internal::hash_str;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::{UnorderedSet, Vector};
+use near_sdk::collections::Vector;
 use near_sdk::{collections::UnorderedMap, log, near_bindgen};
 use near_sdk::{env, AccountId, Gas, PanicOnDefault, Promise, PromiseError};
 
@@ -11,7 +11,7 @@ mod internal;
 const TGAS: u64 = 1_000_000_000_000;
 const NFT_ACCOUNT_ID: &str = "dev-1667910219580-96853394592542";
 
-#[derive(BorshSerialize, BorshDeserialize)]
+#[derive(BorshSerialize, BorshDeserialize, PanicOnDefault, Clone)]
 pub struct User {
     account_id: AccountId,
     balance: u128,
@@ -31,7 +31,7 @@ pub struct Asset {
 
 // Define the contract structure
 #[near_bindgen]
-#[derive(BorshDeserialize, BorshSerialize)]
+#[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct Contract {
     user_index: UnorderedMap<AccountId, u64>,
     users: Vector<User>,
@@ -54,12 +54,12 @@ impl Contract {
         }
     }
 
-    pub fn view_users(&self) -> Vector<User> {
-        let mut result: Vector<User> = Vector::new(hash_str("result").try_to_vec().unwrap());
+    pub fn view_users(&self) -> Vec<(AccountId, u128)> {
+        let mut users = vec![];
         for e in self.users.iter() {
-            result.push(&e);
+            users.push((e.account_id, e.balance));
         }
-        result
+        users
     }
 
     pub fn get_balance(&self, user_id: AccountId) -> u128 {
@@ -79,7 +79,7 @@ impl Contract {
         let deposit = env::attached_deposit();
         let sender_id = env::predecessor_account_id();
 
-        let _ = match self.user_index.get(&sender_id) {
+        match self.user_index.get(&sender_id) {
             Some(_) => {
                 panic!("This user already exist");
             }
