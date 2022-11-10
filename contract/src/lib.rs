@@ -1,11 +1,23 @@
+use external::basic_nft;
+use internal::hash_str;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::Vector;
+use near_sdk::collections::{UnorderedSet, Vector};
 use near_sdk::{collections::UnorderedMap, log, near_bindgen};
-use near_sdk::{env, AccountId, Promise};
+use near_sdk::{env, AccountId, Gas, PanicOnDefault, Promise, PromiseError};
 
-pub type User = UnorderedMap<String, u128>;
+mod external;
+mod internal;
+
+const TGAS: u64 = 1_000_000_000_000;
+const NFT_ACCOUNT_ID: &str = "dev-1667910219580-96853394592542";
 
 #[derive(BorshSerialize, BorshDeserialize)]
+pub struct User {
+    account_id: AccountId,
+    balance: u128,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, PanicOnDefault)]
 pub struct Asset {
     token: UnorderedMap<String, u64>,
     init_time: u64,
@@ -21,58 +33,63 @@ pub struct Asset {
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct Contract {
-    users: User,
+    user_index: UnorderedMap<AccountId, u64>,
+    users: Vector<User>,
     assets: Vector<Asset>,
-    asset_amount: u32,
-    user_amount: u32,
-}
-
-impl Default for Contract {
-    fn default() -> Self {
-        Self {
-            users: UnorderedMap::new(b"m"),
-            assets: Vector::new(b"m"),
-            asset_amount: 0,
-            user_amount: 0,
-        }
-    }
+    asset_amount: u64,
+    user_amount: u64,
 }
 
 // Implement the contract structure
 #[near_bindgen]
 impl Contract {
-    pub fn view_users(&self) -> Vec<(String, u128)> {
-        let mut result: Vec<(String, u128)> = vec![];
+    #[init]
+    pub fn new() -> Self {
+        Self {
+            user_index: UnorderedMap::new(hash_str("indexes").try_to_vec().unwrap()),
+            users: Vector::new(hash_str("users").try_to_vec().unwrap()),
+            assets: Vector::new(hash_str("assets").try_to_vec().unwrap()),
+            asset_amount: 0,
+            user_amount: 0,
+        }
+    }
+
+    pub fn view_users(&self) -> Vector<User> {
+        let mut result: Vector<User> = Vector::new(hash_str("result").try_to_vec().unwrap());
         for e in self.users.iter() {
-            result.push(e);
+            result.push(&e);
         }
         result
     }
 
-    pub fn get_balance(&self, user_id: String) -> u128 {
-        assert!(!user_id.is_empty(), "user_id is empty");
-        let balance = match self.users.get(&user_id) {
-            Some(x) => x,
+    pub fn get_balance(&self, user_id: AccountId) -> u128 {
+        assert!(!user_id.as_str().is_empty(), "user_id is empty");
+        match self.user_index.get(&user_id) {
+            Some(i) => {
+                return self.users.get(i).unwrap().balance;
+            }
             _ => {
                 panic!("\nThis user doesn't exist\n");
             }
         };
-
-        balance
     }
 
     #[payable]
     pub fn new_user(&mut self) {
         let deposit = env::attached_deposit();
-        let sender_id = String::from(env::predecessor_account_id().as_str());
+        let sender_id = env::predecessor_account_id();
 
-        let _ = match self.users.get(&sender_id) {
+        let _ = match self.user_index.get(&sender_id) {
             Some(_) => {
                 panic!("This user already exist");
             }
             _ => {
-                self.users.insert(&sender_id, &deposit);
+                self.user_index.insert(&sender_id, &self.user_amount);
                 self.user_amount += 1;
+                self.users.push(&User {
+                    account_id: sender_id,
+                    balance: deposit,
+                });
             }
         };
     }
@@ -81,32 +98,67 @@ impl Contract {
     pub fn deposit(&mut self) {
         let deposit = env::attached_deposit();
         assert!(deposit > 0, "Not enougth funds");
-        let sender_id = String::from(env::predecessor_account_id().as_str());
+        let sender_id = env::predecessor_account_id();
 
-        let new_balance = match self.users.get(&sender_id) {
-            Some(x) => x + deposit,
+        match self.user_index.get(&sender_id) {
+            Some(i) => {
+                self.users.get(i).unwrap().balance += deposit;
+            }
             _ => {
                 panic!("\nThis user doesn't exist\nYou can call \"new_user\" to register new user");
             }
         };
-        log!("Balance updated: {}", new_balance)
     }
 
-    pub fn withdrow_all(&mut self) {
-        let sender_id = String::from(env::predecessor_account_id().as_str());
-        let balance = match self.users.get(&sender_id) {
-            Some(x) => x,
+    pub fn withdrow_all(&mut self) -> Promise {
+        let sender_id = env::predecessor_account_id();
+        match self.user_index.get(&sender_id) {
+            Some(i) => {
+                let balance = self.users.get(i).unwrap().balance;
+                if balance > 0 {
+                    self.users.get(i).unwrap().balance = 0;
+                    return Promise::new(sender_id).transfer(balance);
+                } else {
+                    panic!("Not enougth funds");
+                }
+            }
             _ => {
                 panic!("\nThis user doesn't exist\nYou can call \"new_user\" to register new user");
             }
         };
+    }
 
-        if balance > 0 {
-            self.users.insert(&sender_id, &0);
-            Promise::new(AccountId::new_unchecked(sender_id)).transfer(balance);
-        } else {
-            panic!("Not enougth funds");
+    pub fn query_transfer(
+        &self,
+        receiver_id: AccountId,
+        token_id: String,
+        memo: Option<String>,
+    ) -> Promise {
+        let promise = basic_nft::ext(AccountId::new_unchecked(String::from(NFT_ACCOUNT_ID)))
+            .with_static_gas(Gas(5 * TGAS))
+            .nft_transfer(receiver_id, token_id, memo);
+
+        promise.then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(Gas(5 * TGAS))
+                .query_transfer_callback(),
+        )
+    }
+
+    #[private]
+    pub fn query_transfer_callback(
+        &self,
+        #[callback_result] call_result: Result<(), PromiseError>,
+    ) -> bool {
+        let mut result = false;
+
+        if !call_result.is_err() {
+            result = true;
+            return result;
         }
+
+        log!("{:?}", call_result.err());
+        result
     }
 }
 
