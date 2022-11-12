@@ -128,15 +128,18 @@ impl Contract {
         };
     }
 
+    #[payable]
     pub fn query_transfer(
-        &self,
+        &mut self,
         receiver_id: AccountId,
         token_id: String,
+        approval_id: Option<u64>,
         memo: Option<String>,
     ) -> Promise {
         let promise = basic_nft::ext(AccountId::new_unchecked(String::from(NFT_ACCOUNT_ID)))
             .with_static_gas(Gas(5 * TGAS))
-            .nft_transfer(receiver_id, token_id, memo);
+            .with_attached_deposit(env::attached_deposit())
+            .nft_transfer(receiver_id, token_id, approval_id, memo);
 
         promise.then(
             Self::ext(env::current_account_id())
@@ -157,7 +160,7 @@ impl Contract {
             return result;
         }
 
-        log!("{:?}", call_result.err());
+        log!("{:?}", call_result.err().unwrap());
         result
     }
 }
