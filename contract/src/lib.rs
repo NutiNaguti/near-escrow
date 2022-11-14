@@ -2,6 +2,7 @@ use external::basic_nft;
 use internal::hash_str;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::UnorderedSet;
+use near_sdk::serde::Serialize;
 use near_sdk::{collections::UnorderedMap, collections::Vector, log, near_bindgen};
 use near_sdk::{env, require, AccountId, Gas, PanicOnDefault, Promise, PromiseError};
 
@@ -24,7 +25,8 @@ pub struct User {
     asset_ids: UnorderedSet<String>,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, PanicOnDefault)]
+#[derive(BorshSerialize, BorshDeserialize, PanicOnDefault, Serialize)]
+#[serde(crate = "near_sdk::serde")]
 pub struct Asset {
     price: u128,
     init_time: u64,
