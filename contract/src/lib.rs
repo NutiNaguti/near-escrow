@@ -8,15 +8,10 @@ use near_sdk::{env, require, AccountId, Gas, PanicOnDefault, Promise, PromiseErr
 
 mod external;
 mod internal;
-mod migrate;
+mod versioned_asset;
+mod versioned_user;
 
 const TGAS: u64 = 1_000_000_000_000;
-
-// hardcoded nft contract address
-const NFT_ACCOUNT_ID: &str = "dev-1667910219580-96853394592542";
-
-#[derive(BorshSerialize, BorshDeserialize)]
-pub struct Version(u8, u8, u8);
 
 #[derive(BorshSerialize, BorshDeserialize)]
 pub struct User {
@@ -39,26 +34,26 @@ pub struct Asset {
 // Define the contract structure
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
-pub struct Contract {
+pub struct EscrowContract {
+    nft_account_id: AccountId,
     user_index: UnorderedMap<AccountId, u64>,
     users: Vector<User>,
     assets: UnorderedMap<String, Asset>,
     asset_amount: u64,
     user_amount: u64,
-    escrow_ver: Version,
 }
 
 #[near_bindgen]
-impl Contract {
+impl EscrowContract {
     #[init]
-    pub fn new() -> Self {
+    pub fn new(nft_account_id: AccountId) -> Self {
         Self {
+            nft_account_id,
             user_index: UnorderedMap::new(hash_str("indexes").try_to_vec().unwrap()),
             users: Vector::new(hash_str("users").try_to_vec().unwrap()),
             assets: UnorderedMap::new(hash_str("assets").try_to_vec().unwrap()),
             asset_amount: 0,
             user_amount: 0,
-            escrow_ver: Version(0, 0, 1),
         }
     }
 
@@ -108,9 +103,7 @@ impl Contract {
                 self.users.push(&User {
                     account_id: sender_id,
                     balance: deposit,
-                    asset_ids: UnorderedSet::new(
-                        hash_str(&format!("asset_index_{}", self.escrow_ver.2)).to_vec(),
-                    ),
+                    asset_ids: UnorderedSet::new(hash_str("asset_index").to_vec()),
                 });
             }
         };
@@ -220,7 +213,7 @@ impl Contract {
         approval_id: Option<u64>,
         memo: Option<String>,
     ) -> Promise {
-        let promise = basic_nft::ext(AccountId::new_unchecked(String::from(NFT_ACCOUNT_ID)))
+        let promise = basic_nft::ext(self.nft_account_id.clone())
             .with_static_gas(Gas(5 * TGAS))
             .with_attached_deposit(env::attached_deposit())
             .nft_transfer(receiver_id, token_id, approval_id, memo);
@@ -249,28 +242,11 @@ impl Contract {
     }
 
     pub fn reset_state(&mut self) {
-        self.escrow_ver.inc();
-        self.user_index = UnorderedMap::new(
-            hash_str(&format!("indexes_{}", self.escrow_ver.2))
-                .try_to_vec()
-                .unwrap(),
-        );
-        self.users = Vector::new(
-            hash_str(&format!("users_{}", self.escrow_ver.2))
-                .try_to_vec()
-                .unwrap(),
-        );
-        self.assets = UnorderedMap::new(
-            hash_str(&format!("assets_{}", self.escrow_ver.2))
-                .try_to_vec()
-                .unwrap(),
-        );
+        self.user_index = UnorderedMap::new(hash_str("indexes").try_to_vec().unwrap());
+        self.users = Vector::new(hash_str("users").try_to_vec().unwrap());
+        self.assets = UnorderedMap::new(hash_str("assets").try_to_vec().unwrap());
         self.asset_amount = 0;
         self.user_amount = 0;
-    }
-
-    pub fn get_current_ver(&self) -> (u8, u8, u8) {
-        (self.escrow_ver.0, self.escrow_ver.1, self.escrow_ver.2)
     }
 }
 
@@ -281,4 +257,6 @@ impl Contract {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn view_users() {}
 }
