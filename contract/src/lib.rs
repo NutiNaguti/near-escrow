@@ -1,10 +1,10 @@
 use external::basic_nft;
-use internal::hash_str;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::UnorderedSet;
 use near_sdk::serde::Serialize;
-use near_sdk::{collections::UnorderedMap, collections::Vector, log, near_bindgen};
-use near_sdk::{env, require, AccountId, Gas, PanicOnDefault, Promise, PromiseError};
+use near_sdk::{collections::UnorderedMap, collections::UnorderedSet, log, near_bindgen};
+use near_sdk::{
+    env, require, AccountId, BorshStorageKey, Gas, PanicOnDefault, Promise, PromiseError,
+};
 
 mod external;
 mod internal;
@@ -13,11 +13,11 @@ mod versioned_user;
 
 const TGAS: u64 = 1_000_000_000_000;
 
-#[derive(BorshSerialize, BorshDeserialize)]
+#[derive(BorshSerialize, BorshDeserialize, Serialize)]
+#[serde(crate = "near_sdk::serde")]
 pub struct User {
-    account_id: AccountId,
     balance: u128,
-    asset_ids: UnorderedSet<String>,
+    asset_ids: Vec<String>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, PanicOnDefault, Serialize)]
@@ -31,56 +31,53 @@ pub struct Asset {
     active: bool,
 }
 
-// Define the contract structure
+#[derive(BorshSerialize, BorshDeserialize, BorshStorageKey)]
+pub enum StorageKey {
+    Users,
+    Assets,
+}
+
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct EscrowContract {
     nft_account_id: AccountId,
-    user_index: UnorderedMap<AccountId, u64>,
-    users: Vector<User>,
+    users: UnorderedMap<AccountId, User>,
     assets: UnorderedMap<String, Asset>,
-    asset_amount: u64,
-    user_amount: u64,
+    asset_amount: u16,
+    user_amount: u16,
 }
 
 #[near_bindgen]
 impl EscrowContract {
     #[init]
+    #[private]
     pub fn new(nft_account_id: AccountId) -> Self {
         Self {
             nft_account_id,
-            user_index: UnorderedMap::new(hash_str("indexes").try_to_vec().unwrap()),
-            users: Vector::new(hash_str("users").try_to_vec().unwrap()),
-            assets: UnorderedMap::new(hash_str("assets").try_to_vec().unwrap()),
+            users: UnorderedMap::new(StorageKey::Users),
+            assets: UnorderedMap::new(StorageKey::Assets),
             asset_amount: 0,
             user_amount: 0,
         }
     }
 
-    pub fn view_users(&self) -> Vec<AccountId> {
-        let mut users = vec![];
-        for e in self.users.iter() {
-            users.push(e.account_id);
-        }
-        users
+    pub fn view_users(&self) -> Vec<(AccountId, User)> {
+        self.users.to_vec()
     }
 
-    pub fn view_user(&self) -> (AccountId, Vec<String>, u128) {
-        let user = match self.user_index.get(&env::predecessor_account_id()) {
-            Some(i) => self.users.get(i).unwrap(),
+    pub fn view_user(&self) -> User {
+        match self.users.get(&env::predecessor_account_id()) {
+            Some(user) => return user,
             _ => {
                 panic!("User not found");
             }
-        };
-
-        (user.account_id, user.asset_ids.to_vec(), user.balance)
+        }
     }
 
-    pub fn get_balance(&self, user_id: AccountId) -> u128 {
-        assert!(!user_id.as_str().is_empty(), "user_id is empty");
-        match self.user_index.get(&user_id) {
-            Some(i) => {
-                return self.users.get(i).unwrap().balance;
+    pub fn get_balance(&self) -> u128 {
+        match self.users.get(&env::predecessor_account_id()) {
+            Some(user) => {
+                return user.balance;
             }
             _ => {
                 panic!("\nThis user doesn't exist\n");
@@ -93,18 +90,19 @@ impl EscrowContract {
         let deposit = env::attached_deposit();
         let sender_id = env::predecessor_account_id();
 
-        match self.user_index.get(&sender_id) {
+        match self.users.get(&sender_id) {
             Some(_) => {
                 panic!("This user already exist");
             }
             _ => {
-                self.user_index.insert(&sender_id, &self.user_amount);
                 self.user_amount += 1;
-                self.users.push(&User {
-                    account_id: sender_id,
-                    balance: deposit,
-                    asset_ids: UnorderedSet::new(hash_str("asset_index").to_vec()),
-                });
+                self.users.insert(
+                    &sender_id,
+                    &User {
+                        balance: deposit,
+                        asset_ids: vec![],
+                    },
+                );
             }
         };
     }
@@ -115,9 +113,16 @@ impl EscrowContract {
         assert!(deposit > 0, "Not enougth funds");
         let sender_id = env::predecessor_account_id();
 
-        match self.user_index.get(&sender_id) {
-            Some(i) => {
-                self.users.get(i).unwrap().balance += deposit;
+        match self.users.get(&sender_id) {
+            Some(user) => {
+                let new_balance = user.balance + deposit;
+                self.users.insert(
+                    &sender_id,
+                    &User {
+                        balance: new_balance,
+                        asset_ids: user.asset_ids,
+                    },
+                )
             }
             _ => {
                 panic!("\nThis user doesn't exist\nYou can call \"new_user\" to register new user");
@@ -127,11 +132,17 @@ impl EscrowContract {
 
     pub fn withdrow_all(&mut self) -> Promise {
         let sender_id = env::predecessor_account_id();
-        match self.user_index.get(&sender_id) {
-            Some(i) => {
-                let balance = self.users.get(i).unwrap().balance;
+        match self.users.get(&sender_id) {
+            Some(user) => {
+                let balance = user.balance;
                 if balance > 0 {
-                    self.users.get(i).unwrap().balance = 0;
+                    self.users.insert(
+                        &sender_id,
+                        &User {
+                            balance: 0,
+                            asset_ids: user.asset_ids,
+                        },
+                    );
                     return Promise::new(sender_id).transfer(balance);
                 } else {
                     panic!("Not enougth funds");
@@ -242,9 +253,8 @@ impl EscrowContract {
     }
 
     pub fn reset_state(&mut self) {
-        self.user_index = UnorderedMap::new(hash_str("indexes").try_to_vec().unwrap());
-        self.users = Vector::new(hash_str("users").try_to_vec().unwrap());
-        self.assets = UnorderedMap::new(hash_str("assets").try_to_vec().unwrap());
+        self.users = UnorderedMap::new(StorageKey::Users);
+        self.assets = UnorderedMap::new(StorageKey::Assets);
         self.asset_amount = 0;
         self.user_amount = 0;
     }
@@ -256,7 +266,94 @@ impl EscrowContract {
  */
 #[cfg(test)]
 mod tests {
+    use near_sdk::{test_utils::VMContextBuilder, testing_env, ONE_NEAR};
+
     use super::*;
 
-    fn view_users() {}
+    fn get_context(predecessor: AccountId) -> VMContextBuilder {
+        let mut builder = VMContextBuilder::new();
+        builder.predecessor_account_id(predecessor);
+        builder
+    }
+
+    #[test]
+    fn test_new_user() {
+        let predecessor: AccountId = "foo".parse().unwrap();
+        let context = get_context(predecessor.clone());
+        testing_env!(context.build());
+        let mut contract = EscrowContract::new("dev-1667910219580-96853394592542".parse().unwrap());
+        contract.new_user();
+        assert_eq!(contract.users.get(&predecessor).unwrap().balance, 0);
+        assert_eq!(
+            contract.users.get(&predecessor).unwrap().asset_ids,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn test_deposit() {
+        let predecessor: AccountId = "foo".parse().unwrap();
+        let mut context = get_context(predecessor.clone());
+        testing_env!(context.attached_deposit(ONE_NEAR).build());
+        let mut contract = EscrowContract::new("dev-1667910219580-96853394592542".parse().unwrap());
+        contract.new_user();
+        println!(
+            "balance: {}",
+            contract.users.get(&predecessor).unwrap().balance
+        );
+        contract.deposit();
+        println!(
+            "balance: {}",
+            contract.users.get(&predecessor).unwrap().balance
+        );
+
+        contract.deposit();
+        println!(
+            "balance: {}",
+            contract.users.get(&predecessor).unwrap().balance
+        );
+
+        assert_eq!(
+            contract.users.get(&predecessor).unwrap().balance,
+            ONE_NEAR * 3
+        );
+    }
+
+    #[test]
+    fn test_view_users() {
+        let predecessor: AccountId = "foo".parse().unwrap();
+        let mut context = get_context(predecessor.clone());
+        testing_env!(context.attached_deposit(ONE_NEAR).build());
+        let mut contract = EscrowContract::new("dev-1667910219580-96853394592542".parse().unwrap());
+        contract.new_user();
+        let users = contract.view_users();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].0, predecessor);
+        assert_eq!(users[0].1.balance, ONE_NEAR);
+        assert_eq!(users[0].1.asset_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_view_user() {
+        let predecessor: AccountId = "foo".parse().unwrap();
+        let mut context = get_context(predecessor.clone());
+        testing_env!(context.attached_deposit(ONE_NEAR).build());
+        let mut contract = EscrowContract::new("dev-1667910219580-96853394592542".parse().unwrap());
+        contract.new_user();
+        let user = contract.view_user();
+        assert_eq!(user.balance, ONE_NEAR);
+        assert_eq!(user.asset_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_withdrow_all() {
+        let predecessor: AccountId = "foo".parse().unwrap();
+        let mut context = get_context(predecessor.clone());
+        testing_env!(context.attached_deposit(ONE_NEAR).build());
+        let mut contract = EscrowContract::new("dev-1667910219580-96853394592542".parse().unwrap());
+        contract.new_user();
+        contract.withdrow_all();
+        let user = contract.view_user();
+        assert_eq!(user.balance, 0);
+    }
 }
